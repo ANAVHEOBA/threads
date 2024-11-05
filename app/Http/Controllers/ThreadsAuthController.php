@@ -7,11 +7,10 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Str;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Config;
 
 class ThreadsAuthController extends Controller
 {
-    private $ngrokUrl = 'https://your-ngrok-url.ngrok-free.app'; // Update with your ngrok URL
-
     public function redirect()
     {
         try {
@@ -20,10 +19,10 @@ class ThreadsAuthController extends Controller
 
             // Basic scope first - minimal permissions
             $queryParams = http_build_query([
-                'client_id' => '904272161298399',
-                'redirect_uri' => $this->ngrokUrl . '/api/callback',
+                'client_id' => Config::get('services.threads.client_id'),
+                'redirect_uri' => Config::get('services.threads.redirect_uri'),
                 'response_type' => 'code',
-                'scope' => 'public_profile', // Start with basic scope
+                'scope' => Config::get('services.threads.basic_scope'),
                 'state' => $state,
                 'auth_type' => 'rerequest'
             ]);
@@ -32,14 +31,14 @@ class ThreadsAuthController extends Controller
 
             Log::info('Generated Auth URL', [
                 'url' => $authUrl,
-                'scope' => 'public_profile'
+                'scope' => Config::get('services.threads.basic_scope')
             ]);
 
             return response()->json([
                 'status' => 'success',
                 'message' => 'Authorization URL generated',
                 'auth_url' => $authUrl,
-                'auth_url_with_permissions' => $this->getAuthUrlWithPermissions($state), // Additional URL with full permissions
+                'auth_url_with_permissions' => $this->getAuthUrlWithPermissions($state),
                 'instructions' => [
                     'basic_auth' => 'Use auth_url for basic authentication',
                     'full_auth' => 'Use auth_url_with_permissions for full access (if needed)',
@@ -64,10 +63,10 @@ class ThreadsAuthController extends Controller
     private function getAuthUrlWithPermissions($state)
     {
         $queryParams = http_build_query([
-            'client_id' => '904272161298399',
-            'redirect_uri' => $this->ngrokUrl . '/api/callback',
+            'client_id' => Config::get('services.threads.client_id'),
+            'redirect_uri' => Config::get('services.threads.redirect_uri'),
             'response_type' => 'code',
-            'scope' => 'public_profile threads_basic threads_content_publish threads_read_write',
+            'scope' => Config::get('services.threads.full_scope'),
             'state' => $state,
             'auth_type' => 'rerequest'
         ]);
@@ -80,25 +79,13 @@ class ThreadsAuthController extends Controller
         Log::info('Callback Received', ['params' => $request->all()]);
 
         if ($request->has('error')) {
-            // Handle specific error cases
-            switch ($request->error) {
-                case 'access_denied':
-                    return response()->json([
-                        'status' => 'error',
-                        'message' => 'Access was denied',
-                        'suggestion' => 'Try using the basic authentication URL',
-                        'retry_url' => $this->ngrokUrl . '/api/threads/auth'
-                    ], 400);
-                    
-                default:
-                    return response()->json([
-                        'status' => 'error',
-                        'message' => 'Authorization failed',
-                        'error' => $request->error,
-                        'error_description' => $request->error_description,
-                        'retry_url' => $this->ngrokUrl . '/api/threads/auth'
-                    ], 400);
-            }
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Authorization failed',
+                'error' => $request->error,
+                'error_description' => $request->error_description,
+                'retry_url' => url('/api/threads/auth')
+            ], 400);
         }
 
         if (!$request->has('code')) {
@@ -111,9 +98,9 @@ class ThreadsAuthController extends Controller
 
         try {
             $response = Http::post('https://graph.threads.net/oauth/access_token', [
-                'client_id' => '904272161298399',
-                'client_secret' => '149a0dff06ef43ffcbbecd1bbf118fda',
-                'redirect_uri' => $this->ngrokUrl . '/api/callback',
+                'client_id' => Config::get('services.threads.client_id'),
+                'client_secret' => Config::get('services.threads.client_secret'),
+                'redirect_uri' => Config::get('services.threads.redirect_uri'),
                 'code' => $request->code,
                 'grant_type' => 'authorization_code'
             ]);
@@ -128,44 +115,28 @@ class ThreadsAuthController extends Controller
                     'status' => 'error',
                     'message' => 'Failed to get access token',
                     'details' => $response->json(),
-                    'suggestion' => 'Try the alternative authentication URL',
-                    'retry_url' => $this->ngrokUrl . '/api/threads/auth'
+                    'retry_url' => url('/api/threads/auth')
                 ], 400);
             }
 
             $tokenData = $response->json();
 
-            // Store the token with additional error handling
-            try {
-                $threadsUser = ThreadsUser::updateOrCreate(
-                    ['threads_user_id' => $tokenData['user_id'] ?? Str::uuid()],
-                    [
-                        'threads_access_token' => $tokenData['access_token'],
-                        'token_expires_at' => now()->addSeconds($tokenData['expires_in'] ?? 3600),
-                        'scope' => $tokenData['scope'] ?? 'public_profile',
-                        'last_auth_at' => now(),
-                    ]
-                );
+            $threadsUser = ThreadsUser::updateOrCreate(
+                ['threads_user_id' => $tokenData['user_id'] ?? Str::uuid()],
+                [
+                    'threads_access_token' => $tokenData['access_token'],
+                    'token_expires_at' => now()->addSeconds($tokenData['expires_in'] ?? 3600),
+                    'scope' => $tokenData['scope'] ?? Config::get('services.threads.basic_scope'),
+                    'last_auth_at' => now(),
+                ]
+            );
 
-                return response()->json([
-                    'status' => 'success',
-                    'message' => 'Successfully connected to Threads',
-                    'permissions' => $tokenData['scope'] ?? 'public_profile',
-                    'user_data' => $threadsUser
-                ]);
-
-            } catch (\Exception $e) {
-                Log::error('Token Storage Error', [
-                    'error' => $e->getMessage(),
-                    'token_data' => $tokenData
-                ]);
-
-                return response()->json([
-                    'status' => 'error',
-                    'message' => 'Failed to store token',
-                    'error' => $e->getMessage()
-                ], 500);
-            }
+            return response()->json([
+                'status' => 'success',
+                'message' => 'Successfully connected to Threads',
+                'permissions' => $tokenData['scope'] ?? Config::get('services.threads.basic_scope'),
+                'user_data' => $threadsUser
+            ]);
 
         } catch (\Exception $e) {
             Log::error('Callback Processing Error', [
@@ -177,7 +148,7 @@ class ThreadsAuthController extends Controller
                 'status' => 'error',
                 'message' => 'Failed to process callback',
                 'error' => $e->getMessage(),
-                'retry_url' => $this->ngrokUrl . '/api/threads/auth'
+                'retry_url' => url('/api/threads/auth')
             ], 500);
         }
     }

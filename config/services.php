@@ -34,7 +34,9 @@ return [
     'threads' => [
     'client_id' => env('THREADS_CLIENT_ID'),
     'client_secret' => env('THREADS_CLIENT_SECRET'),
-    'redirect' => env('THREADS_REDIRECT_URI'),
+    'redirect_uri' => env('THREADS_REDIRECT_URI'),
+    'basic_scope' => env('THREADS_BASIC_SCOPE', 'public_profile'),
+    'full_scope' => env('THREADS_FULL_SCOPE', 'public_profile threads_basic threads_content_publish threads_read_write'),
 ],
 
 ];
