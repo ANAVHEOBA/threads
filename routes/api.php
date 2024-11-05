@@ -58,5 +58,4 @@ Route::middleware("auth:sanctum")->group(function () {
         Route::post('/post', [ThreadsController::class, 'createPost']);
     });
     
-    // Or if you want the callback outside the threads prefix
-    Route::get('/callback', [ThreadsAuthController::class, 'callback']);
+   
