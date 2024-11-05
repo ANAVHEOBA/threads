@@ -35,13 +35,7 @@ class ThreadsAuthController extends Controller
             return response()->json([
                 'status' => 'success',
                 'message' => 'Please open this URL in your browser to authorize',
-                'auth_url' => $authUrl,
-                'instructions' => [
-                    'step1' => 'Open the auth_url in your browser',
-                    'step2' => 'Login to Threads if needed',
-                    'step3' => 'Authorize the application',
-                    'step4' => 'You will be redirected back automatically'
-                ]
+                'auth_url' => $authUrl
             ]);
 
         } catch (\Exception $e) {
@@ -67,21 +61,19 @@ class ThreadsAuthController extends Controller
                 'status' => 'error',
                 'message' => 'Authorization failed',
                 'error' => $request->error,
-                'error_description' => $request->error_description,
-                'retry_url' => url('/api/threads/auth')
+                'error_description' => $request->error_description
             ], 400);
         }
 
         if (!$request->has('code')) {
             return response()->json([
                 'status' => 'error',
-                'message' => 'No authorization code provided',
-                'help' => 'Start the auth flow at /api/threads/auth'
+                'message' => 'No authorization code provided'
             ], 400);
         }
 
         try {
-            $response = Http::post('https://graph.threads.net/oauth/access_token', [
+            $tokenResponse = Http::post('https://graph.threads.net/oauth/access_token', [
                 'client_id' => Config::get('services.threads.client_id'),
                 'client_secret' => Config::get('services.threads.client_secret'),
                 'redirect_uri' => Config::get('services.threads.redirect_uri'),
@@ -89,30 +81,41 @@ class ThreadsAuthController extends Controller
                 'grant_type' => 'authorization_code'
             ]);
 
-            Log::info('Token Request Response', [
-                'status' => $response->status(),
-                'body' => $response->json()
-            ]);
-
-            if ($response->failed()) {
+            if ($tokenResponse->failed()) {
                 return response()->json([
                     'status' => 'error',
                     'message' => 'Failed to get access token',
-                    'details' => $response->json(),
-                    'retry_url' => url('/api/threads/auth')
+                    'details' => $tokenResponse->json()
                 ], 400);
             }
 
-            $tokenData = $response->json();
+            $tokenData = $tokenResponse->json();
+            $accessToken = $tokenData['access_token'];
 
-            // Store the token
+            // Fetch user details
+            $userResponse = Http::get('https://graph.threads.net/v1/me', [
+                'access_token' => $accessToken,
+                'fields' => 'id,username,email,profile_pic_url,biography,followers_count,following_count'
+            ]);
+
+            $userData = $userResponse->successful() ? $userResponse->json() : [];
+
+            // Store user data
             $threadsUser = ThreadsUser::updateOrCreate(
-                ['threads_user_id' => $tokenData['user_id'] ?? Str::uuid()],
+                ['threads_user_id' => $userData['id'] ?? $tokenData['user_id']],
                 [
-                    'threads_access_token' => $tokenData['access_token'],
+                    'threads_access_token' => $accessToken,
+                    'threads_refresh_token' => $tokenData['refresh_token'] ?? null,
                     'token_expires_at' => now()->addSeconds($tokenData['expires_in'] ?? 3600),
+                    'username' => $userData['username'] ?? null,
+                    'email' => $userData['email'] ?? null,
+                    'profile_pic_url' => $userData['profile_pic_url'] ?? null,
+                    'biography' => $userData['biography'] ?? null,
+                    'followers_count' => $userData['followers_count'] ?? 0,
+                    'following_count' => $userData['following_count'] ?? 0,
                     'scope' => Config::get('services.threads.scope'),
                     'last_auth_at' => now(),
+                    'state' => $request->state
                 ]
             );
 
@@ -131,8 +134,45 @@ class ThreadsAuthController extends Controller
             return response()->json([
                 'status' => 'error',
                 'message' => 'Failed to process callback',
-                'error' => $e->getMessage(),
-                'retry_url' => url('/api/threads/auth')
+                'error' => $e->getMessage()
+            ], 500);
+        }
+    }
+
+    public function getUserDetails($threads_user_id)
+    {
+        try {
+            $user = ThreadsUser::where('threads_user_id', $threads_user_id)->firstOrFail();
+
+            // Refresh user details from API
+            $response = Http::get('https://graph.threads.net/v1/me', [
+                'access_token' => $user->threads_access_token,
+                'fields' => 'id,username,email,profile_pic_url,biography,followers_count,following_count'
+            ]);
+
+            if ($response->successful()) {
+                $userData = $response->json();
+                
+                $user->update([
+                    'username' => $userData['username'] ?? $user->username,
+                    'email' => $userData['email'] ?? $user->email,
+                    'profile_pic_url' => $userData['profile_pic_url'] ?? $user->profile_pic_url,
+                    'biography' => $userData['biography'] ?? $user->biography,
+                    'followers_count' => $userData['followers_count'] ?? $user->followers_count,
+                    'following_count' => $userData['following_count'] ?? $user->following_count,
+                ]);
+            }
+
+            return response()->json([
+                'status' => 'success',
+                'user_data' => $user
+            ]);
+
+        } catch (\Exception $e) {
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Failed to get user details',
+                'error' => $e->getMessage()
             ], 500);
         }
     }

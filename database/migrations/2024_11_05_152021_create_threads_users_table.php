@@ -17,6 +17,12 @@ return new class extends Migration
             $table->string('username')->nullable();
             $table->string('email')->nullable();
             $table->string('state')->nullable(); // For OAuth state verification
+            $table->text('profile_pic_url')->nullable();
+            $table->text('biography')->nullable();
+            $table->integer('followers_count')->default(0);
+            $table->integer('following_count')->default(0);
+            $table->string('scope')->nullable();
+            $table->timestamp('last_auth_at')->nullable();
             $table->timestamps();
         });
 

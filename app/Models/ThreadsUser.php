@@ -13,13 +13,25 @@ class ThreadsUser extends Model
         'token_expires_at',
         'username',
         'email',
-        'state'
+        'state',
+        'profile_pic_url',
+        'biography',
+        'followers_count',
+        'following_count',
+        'scope',
+        'last_auth_at'
     ];
 
     protected $dates = [
         'token_expires_at',
+        'last_auth_at',
         'created_at',
         'updated_at'
+    ];
+
+    protected $hidden = [
+        'threads_access_token',
+        'threads_refresh_token'
     ];
 
     public function posts()

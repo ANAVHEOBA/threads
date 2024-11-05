@@ -56,6 +56,7 @@ Route::middleware("auth:sanctum")->group(function () {
         Route::get('/auth', [ThreadsAuthController::class, 'redirect']);
         Route::get('/callback', [ThreadsAuthController::class, 'callback']);
         Route::post('/post', [ThreadsController::class, 'createPost']);
+        Route::get('/user/{threads_user_id}', [ThreadsAuthController::class, 'getUserDetails']);
     });
     
    
