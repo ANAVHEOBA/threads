@@ -4,8 +4,6 @@ namespace App\Http\Controllers;
 
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Http;
-use Illuminate\Support\Facades\Storage;
-use Illuminate\Support\Str;
 
 class ThreadsController extends Controller
 {
@@ -21,45 +19,79 @@ class ThreadsController extends Controller
             $accessToken = session('threads_access_token');
             $userId = session('threads_user_id');
             
-            // Handle media uploads
-            $mediaUrl = null;
+            // First, upload media to Threads if present
             $mediaType = 'TEXT';
+            $mediaUrl = null;
 
             if ($request->hasFile('image')) {
-                $mediaUrl = $this->handleImageUpload($request->file('image'));
                 $mediaType = 'IMAGE';
-            } elseif ($request->hasFile('video')) {
-                $mediaUrl = $this->handleVideoUpload($request->file('video'));
+                // Upload image to Threads
+                $response = Http::attach(
+                    'image', 
+                    file_get_contents($request->file('image')->path()), 
+                    $request->file('image')->getClientOriginalName()
+                )->post("https://graph.threads.net/v1.0/{$userId}/media", [
+                    'access_token' => $accessToken,
+                    'media_type' => 'IMAGE',
+                ]);
+
+                if ($response->failed()) {
+                    return response()->json([
+                        'status' => 'error',
+                        'message' => 'Failed to upload image',
+                        'details' => $response->json()
+                    ], 400);
+                }
+
+                $mediaUrl = $response->json()['id']; // Get the media ID from Threads
+            }
+            elseif ($request->hasFile('video')) {
                 $mediaType = 'VIDEO';
+                // Upload video to Threads
+                $response = Http::attach(
+                    'video', 
+                    file_get_contents($request->file('video')->path()), 
+                    $request->file('video')->getClientOriginalName()
+                )->post("https://graph.threads.net/v1.0/{$userId}/media", [
+                    'access_token' => $accessToken,
+                    'media_type' => 'VIDEO',
+                ]);
+
+                if ($response->failed()) {
+                    return response()->json([
+                        'status' => 'error',
+                        'message' => 'Failed to upload video',
+                        'details' => $response->json()
+                    ], 400);
+                }
+
+                $mediaUrl = $response->json()['id']; // Get the media ID from Threads
             }
 
-            // Step 1: Create media container
-            $response = Http::post("https://graph.threads.net/v1.0/{$userId}/threads", [
+            // Create the post with the uploaded media
+            $postData = [
                 'access_token' => $accessToken,
                 'media_type' => $mediaType,
                 'text' => $request->text,
-                'image_url' => $mediaType === 'IMAGE' ? $mediaUrl : null,
-                'video_url' => $mediaType === 'VIDEO' ? $mediaUrl : null,
-            ]);
+            ];
+
+            if ($mediaUrl) {
+                $postData[$mediaType === 'IMAGE' ? 'image_id' : 'video_id'] = $mediaUrl;
+            }
+
+            $response = Http::post("https://graph.threads.net/v1.0/{$userId}/threads", $postData);
 
             if ($response->failed()) {
-                // Clean up uploaded file if request fails
-                if ($mediaUrl) {
-                    Storage::delete($this->getStoragePath($mediaUrl));
-                }
-                
                 return response()->json([
                     'status' => 'error',
-                    'message' => 'Failed to create media container',
+                    'message' => 'Failed to create post',
                     'details' => $response->json()
                 ], 400);
             }
 
             $containerId = $response->json()['id'];
 
-            // Step 2: Publish the container
-            sleep(2); // Wait for processing
-            
+            // Publish the post
             $publishResponse = Http::post("https://graph.threads.net/v1.0/{$userId}/threads_publish", [
                 'access_token' => $accessToken,
                 'creation_id' => $containerId,
@@ -76,8 +108,7 @@ class ThreadsController extends Controller
             return response()->json([
                 'status' => 'success',
                 'message' => 'Post published successfully',
-                'thread_id' => $publishResponse->json()['id'],
-                'media_url' => $mediaUrl
+                'thread_id' => $publishResponse->json()['id']
             ]);
 
         } catch (\Exception $e) {
@@ -87,37 +118,5 @@ class ThreadsController extends Controller
                 'details' => $e->getMessage()
             ], 500);
         }
-    }
-
-    private function handleImageUpload($file)
-    {
-        $filename = $this->generateUniqueFilename($file);
-        $path = $file->storeAs('public/threads/images', $filename);
-        return $this->getPublicUrl($path);
-    }
-
-    private function handleVideoUpload($file)
-    {
-        $filename = $this->generateUniqueFilename($file);
-        $path = $file->storeAs('public/threads/videos', $filename);
-        return $this->getPublicUrl($path);
-    }
-
-    private function generateUniqueFilename($file)
-    {
-        return Str::uuid() . '.' . $file->getClientOriginalExtension();
-    }
-
-    private function getPublicUrl($path)
-    {
-        // Replace 'public' with 'storage' in the path
-        $publicPath = str_replace('public/', '', $path);
-        return url('storage/' . $publicPath);
-    }
-
-    private function getStoragePath($url)
-    {
-        // Convert public URL back to storage path
-        return str_replace(url('storage/'), 'public/', $url);
     }
 }
