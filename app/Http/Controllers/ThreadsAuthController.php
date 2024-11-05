@@ -17,32 +17,30 @@ class ThreadsAuthController extends Controller
             $state = Str::random(40);
             session(['threads_state' => $state]);
 
-            // Basic scope first - minimal permissions
             $queryParams = http_build_query([
                 'client_id' => Config::get('services.threads.client_id'),
                 'redirect_uri' => Config::get('services.threads.redirect_uri'),
                 'response_type' => 'code',
-                'scope' => Config::get('services.threads.basic_scope'),
-                'state' => $state,
-                'auth_type' => 'rerequest'
+                'scope' => Config::get('services.threads.scope'),
+                'state' => $state
             ]);
 
             $authUrl = 'https://www.threads.net/oauth/authorize?' . $queryParams;
 
             Log::info('Generated Auth URL', [
                 'url' => $authUrl,
-                'scope' => Config::get('services.threads.basic_scope')
+                'scope' => Config::get('services.threads.scope')
             ]);
 
             return response()->json([
                 'status' => 'success',
-                'message' => 'Authorization URL generated',
+                'message' => 'Please open this URL in your browser to authorize',
                 'auth_url' => $authUrl,
-                'auth_url_with_permissions' => $this->getAuthUrlWithPermissions($state),
                 'instructions' => [
-                    'basic_auth' => 'Use auth_url for basic authentication',
-                    'full_auth' => 'Use auth_url_with_permissions for full access (if needed)',
-                    'note' => 'If basic auth fails, try the URL with permissions'
+                    'step1' => 'Open the auth_url in your browser',
+                    'step2' => 'Login to Threads if needed',
+                    'step3' => 'Authorize the application',
+                    'step4' => 'You will be redirected back automatically'
                 ]
             ]);
 
@@ -58,20 +56,6 @@ class ThreadsAuthController extends Controller
                 'error' => $e->getMessage()
             ], 500);
         }
-    }
-
-    private function getAuthUrlWithPermissions($state)
-    {
-        $queryParams = http_build_query([
-            'client_id' => Config::get('services.threads.client_id'),
-            'redirect_uri' => Config::get('services.threads.redirect_uri'),
-            'response_type' => 'code',
-            'scope' => Config::get('services.threads.full_scope'),
-            'state' => $state,
-            'auth_type' => 'rerequest'
-        ]);
-
-        return 'https://www.threads.net/oauth/authorize?' . $queryParams;
     }
 
     public function callback(Request $request)
@@ -121,12 +105,13 @@ class ThreadsAuthController extends Controller
 
             $tokenData = $response->json();
 
+            // Store the token
             $threadsUser = ThreadsUser::updateOrCreate(
                 ['threads_user_id' => $tokenData['user_id'] ?? Str::uuid()],
                 [
                     'threads_access_token' => $tokenData['access_token'],
                     'token_expires_at' => now()->addSeconds($tokenData['expires_in'] ?? 3600),
-                    'scope' => $tokenData['scope'] ?? Config::get('services.threads.basic_scope'),
+                    'scope' => Config::get('services.threads.scope'),
                     'last_auth_at' => now(),
                 ]
             );
@@ -134,7 +119,6 @@ class ThreadsAuthController extends Controller
             return response()->json([
                 'status' => 'success',
                 'message' => 'Successfully connected to Threads',
-                'permissions' => $tokenData['scope'] ?? Config::get('services.threads.basic_scope'),
                 'user_data' => $threadsUser
             ]);
 
