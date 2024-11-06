@@ -73,36 +73,17 @@ class MastodonAuthController extends Controller
             }
 
             // Exchange code for token
-            $response = Http::post("{$this->instanceUrl}/oauth/token", [
-                'client_id' => $this->clientId,
-                'client_secret' => $this->clientSecret,
-                'redirect_uri' => $this->redirectUri,
-                'grant_type' => 'authorization_code',
-                'code' => $request->code,
-                'scope' => $this->scopes
-            ]);
-
-            if (!$response->successful()) {
-                throw new \Exception('Failed to obtain access token: ' . $response->body());
-            }
-
-            $tokenData = $response->json();
+            $tokenData = $this->getTokenFromCode($request->code);
 
             // Get user details
-            $userResponse = Http::withToken($tokenData['access_token'])
-                ->get("{$this->instanceUrl}/api/v1/accounts/verify_credentials");
-
-            if (!$userResponse->successful()) {
-                throw new \Exception('Failed to get user details: ' . $userResponse->body());
-            }
-
-            $userData = $userResponse->json();
+            $userData = $this->getUserDetails($tokenData['access_token']);
 
             // Store or update user
             $user = MastodonUser::updateOrCreate(
                 ['mastodon_user_id' => $userData['id']],
                 [
                     'mastodon_access_token' => $tokenData['access_token'],
+                    'refresh_token' => $tokenData['refresh_token'] ?? null,
                     'username' => $userData['username'],
                     'display_name' => $userData['display_name'],
                     'avatar_url' => $userData['avatar'],
@@ -133,5 +114,93 @@ class MastodonAuthController extends Controller
                 'error' => $e->getMessage()
             ], 500);
         }
+    }
+
+    public function refreshToken(MastodonUser $user)
+    {
+        try {
+            if (!$user->refresh_token) {
+                throw new \Exception('No refresh token available for user');
+            }
+
+            $response = Http::post("{$user->instance_url}/oauth/token", [
+                'client_id' => $this->clientId,
+                'client_secret' => $this->clientSecret,
+                'refresh_token' => $user->refresh_token,
+                'grant_type' => 'refresh_token',
+                'scope' => $this->scopes
+            ]);
+
+            if (!$response->successful()) {
+                throw new \Exception('Failed to refresh token: ' . $response->body());
+            }
+
+            $tokenData = $response->json();
+
+            $user->update([
+                'mastodon_access_token' => $tokenData['access_token'],
+                'refresh_token' => $tokenData['refresh_token'] ?? $user->refresh_token,
+                'token_expires_at' => isset($tokenData['expires_in']) 
+                    ? now()->addSeconds($tokenData['expires_in']) 
+                    : null,
+                'scope' => $tokenData['scope'] ?? $user->scope
+            ]);
+
+            return $user->mastodon_access_token;
+
+        } catch (\Exception $e) {
+            Log::error('Mastodon Token Refresh Error', [
+                'user_id' => $user->id,
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
+            throw $e;
+        }
+    }
+
+    public function getValidToken(MastodonUser $user)
+    {
+        try {
+            if ($user->needsTokenRefresh()) {
+                return $this->refreshToken($user);
+            }
+            return $user->mastodon_access_token;
+        } catch (\Exception $e) {
+            Log::error('Token Validation Error', [
+                'user_id' => $user->id,
+                'error' => $e->getMessage()
+            ]);
+            throw $e;
+        }
+    }
+
+    private function getTokenFromCode($code)
+    {
+        $response = Http::post("{$this->instanceUrl}/oauth/token", [
+            'client_id' => $this->clientId,
+            'client_secret' => $this->clientSecret,
+            'redirect_uri' => $this->redirectUri,
+            'grant_type' => 'authorization_code',
+            'code' => $code,
+            'scope' => $this->scopes
+        ]);
+
+        if (!$response->successful()) {
+            throw new \Exception('Failed to obtain access token: ' . $response->body());
+        }
+
+        return $response->json();
+    }
+
+    private function getUserDetails($accessToken)
+    {
+        $response = Http::withToken($accessToken)
+            ->get("{$this->instanceUrl}/api/v1/accounts/verify_credentials");
+
+        if (!$response->successful()) {
+            throw new \Exception('Failed to get user details: ' . $response->body());
+        }
+
+        return $response->json();
     }
 }

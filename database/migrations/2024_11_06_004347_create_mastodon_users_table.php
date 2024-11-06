@@ -12,6 +12,7 @@ return new class extends Migration
             $table->id();
             $table->string('mastodon_user_id')->unique();
             $table->string('mastodon_access_token');
+            $table->string('refresh_token')->nullable(); // Added for token refresh
             $table->string('username')->nullable();
             $table->string('display_name')->nullable();
             $table->text('avatar_url')->nullable();

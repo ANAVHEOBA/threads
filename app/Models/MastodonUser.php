@@ -9,6 +9,7 @@ class MastodonUser extends Model
     protected $fillable = [
         'mastodon_user_id',
         'mastodon_access_token',
+        'refresh_token',
         'username',
         'display_name',
         'avatar_url',
@@ -26,11 +27,17 @@ class MastodonUser extends Model
     ];
 
     protected $hidden = [
-        'mastodon_access_token'
+        'mastodon_access_token',
+        'refresh_token'
     ];
 
     public function posts()
     {
         return $this->hasMany(MastodonPost::class);
+    }
+
+    public function needsTokenRefresh()
+    {
+        return $this->token_expires_at && $this->token_expires_at->subMinutes(5)->isPast();
     }
 }
