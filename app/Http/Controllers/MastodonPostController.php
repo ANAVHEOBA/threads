@@ -9,119 +9,90 @@ use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 
+/**
+ * MastodonPostController
+ * 
+ * Handles all Mastodon post-related operations including:
+ * - Text posts
+ * - Single image uploads
+ * - Multiple image uploads (carousel)
+ * - Video uploads
+ * - Post deletion
+ */
 class MastodonPostController extends Controller
 {
     /**
-     * Upload media from URL to Mastodon
+     * Configuration constants
      */
-    private function uploadMediaFromUrl($url, $token, $instanceUrl)
-    {
-        try {
-            // Download the media file
-            $mediaResponse = Http::get($url);
-            if (!$mediaResponse->successful()) {
-                throw new \Exception("Failed to download media from URL: {$url}");
-            }
-
-            // Get file info
-            $contentType = $mediaResponse->header('Content-Type');
-            $extension = $this->getExtensionFromMimeType($contentType);
-            $tempPath = sys_get_temp_dir() . '/' . uniqid() . '.' . $extension;
-
-            // Save temporarily
-            file_put_contents($tempPath, $mediaResponse->body());
-
-            // Upload to Mastodon
-            $response = Http::withToken($token)
-                ->attach('file', file_get_contents($tempPath), 'media.' . $extension, ['Content-Type' => $contentType])
-                ->post("{$instanceUrl}/api/v1/media");
-
-            // Clean up temp file
-            unlink($tempPath);
-
-            if (!$response->successful()) {
-                throw new \Exception("Failed to upload media to Mastodon: " . $response->body());
-            }
-
-            // Wait for media processing
-            $mediaId = $response->json()['id'];
-            $attempts = 0;
-            $maxAttempts = 10;
-
-            while ($attempts < $maxAttempts) {
-                $mediaStatus = Http::withToken($token)
-                    ->get("{$instanceUrl}/api/v1/media/{$mediaId}");
-
-                if ($mediaStatus->successful()) {
-                    $mediaData = $mediaStatus->json();
-                    if (isset($mediaData['url']) && $mediaData['url']) {
-                        return $mediaData;
-                    }
-                }
-
-                $attempts++;
-                sleep(1); // Wait 1 second before checking again
-            }
-
-            throw new \Exception("Media processing timeout");
-
-        } catch (\Exception $e) {
-            Log::error('Media Upload Error', [
-                'url' => $url,
-                'error' => $e->getMessage()
-            ]);
-            throw $e;
-        }
-    }
+    private const MAX_FILE_SIZE = 41943040; // 40MB in bytes
+    private const MAX_IMAGE_WAIT = 10; // seconds
+    private const MAX_VIDEO_WAIT = 60; // seconds
+    private const MAX_RETRY_ATTEMPTS = 3;
 
     /**
-     * Get file extension from MIME type
+     * Supported media types configuration
      */
-    private function getExtensionFromMimeType($mimeType)
-    {
-        $map = [
-            'image/jpeg' => 'jpg',
-            'image/jpg' => 'jpg',
-            'image/png' => 'png',
-            'image/gif' => 'gif',
-            'video/mp4' => 'mp4',
-            'video/quicktime' => 'mov',
-            'video/webm' => 'webm',
-        ];
-
-        return $map[$mimeType] ?? 'tmp';
-    }
+    private $mediaTypes = [
+        // Images
+        'image/jpeg' => ['ext' => 'jpg', 'type' => 'image'],
+        'image/jpg' => ['ext' => 'jpg', 'type' => 'image'],
+        'image/png' => ['ext' => 'png', 'type' => 'image'],
+        'image/gif' => ['ext' => 'gif', 'type' => 'image'],
+        'image/webp' => ['ext' => 'webp', 'type' => 'image'],
+        // Videos
+        'video/mp4' => ['ext' => 'mp4', 'type' => 'video'],
+        'video/quicktime' => ['ext' => 'mov', 'type' => 'video'],
+        'video/webm' => ['ext' => 'webm', 'type' => 'video'],
+        'video/x-ms-wmv' => ['ext' => 'wmv', 'type' => 'video'],
+        'video/mpeg' => ['ext' => 'mpeg', 'type' => 'video'],
+    ];
 
     /**
-     * Create a new post with optional media
+     * Create a new post with media support
+     *
+     * @param Request $request
+     * @return \Illuminate\Http\JsonResponse
      */
     public function createPost(Request $request)
     {
+        // Validate the incoming request
         $request->validate([
             'user_id' => 'required|exists:mastodon_users,id',
-            'content' => 'required|string',
-            'media_urls' => 'array|nullable|max:4', // Mastodon typically limits to 4 media attachments
+            'content' => 'required|string|max:500',
+            'media_urls' => 'array|nullable|max:4',
             'media_urls.*' => 'url',
             'visibility' => 'string|in:public,unlisted,private,direct',
             'sensitive' => 'boolean',
-            'spoiler_text' => 'string|nullable',
-            'language' => 'string|nullable'
+            'spoiler_text' => 'string|nullable|max:100',
+            'language' => 'string|nullable|size:2'
         ]);
 
         try {
             $user = MastodonUser::findOrFail($request->user_id);
             $mediaIds = [];
 
-            // Handle media uploads if present
+            // Process media if present
             if (!empty($request->media_urls)) {
-                foreach ($request->media_urls as $mediaUrl) {
+                foreach ($request->media_urls as $index => $mediaUrl) {
                     try {
-                        $mediaResponse = $this->uploadMediaFromUrl(
-                            $mediaUrl, 
+                        Log::info('Processing media', [
+                            'url' => $mediaUrl,
+                            'index' => $index
+                        ]);
+
+                        $mediaResponse = $this->processMediaUpload(
+                            $mediaUrl,
                             $user->mastodon_access_token,
                             $user->instance_url
                         );
-                        $mediaIds[] = $mediaResponse['id'];
+
+                        if ($mediaResponse) {
+                            $mediaIds[] = $mediaResponse['id'];
+                            Log::info('Media processed successfully', [
+                                'media_id' => $mediaResponse['id'],
+                                'type' => $mediaResponse['type'] ?? 'unknown'
+                            ]);
+                        }
                     } catch (\Exception $e) {
                         Log::error('Media Upload Failed', [
                             'url' => $mediaUrl,
@@ -133,31 +104,31 @@ class MastodonPostController extends Controller
                 }
             }
 
-            // Create the post
+            // Prepare post data
+            $postData = array_filter([
+                'status' => $request->content,
+                'media_ids' => $mediaIds,
+                'visibility' => $request->visibility ?? 'public',
+                'sensitive' => $request->sensitive ?? false,
+                'spoiler_text' => $request->spoiler_text,
+                'language' => $request->language
+            ]);
+
+            // Create post on Mastodon
             $response = Http::withToken($user->mastodon_access_token)
-                ->post("{$user->instance_url}/api/v1/statuses", array_filter([
-                    'status' => $request->content,
-                    'media_ids' => $mediaIds,
-                    'visibility' => $request->visibility ?? 'public',
-                    'sensitive' => $request->sensitive ?? false,
-                    'spoiler_text' => $request->spoiler_text,
-                    'language' => $request->language
-                ]));
+                ->timeout(30)
+                ->post("{$user->instance_url}/api/v1/statuses", $postData);
 
             if (!$response->successful()) {
-                return response()->json([
-                    'status' => 'error',
-                    'message' => 'Failed to create post',
-                    'error' => $response->json()
-                ], 400);
+                throw new \Exception('Failed to create post: ' . $response->body());
             }
 
-            $postData = $response->json();
+            $postResponse = $response->json();
 
             // Save to database
             $post = MastodonPost::create([
                 'mastodon_user_id' => $user->id,
-                'post_id' => $postData['id'],
+                'post_id' => $postResponse['id'],
                 'content' => $request->content,
                 'visibility' => $request->visibility ?? 'public',
                 'sensitive' => $request->sensitive ?? false,
@@ -171,7 +142,7 @@ class MastodonPostController extends Controller
                 'status' => 'success',
                 'message' => 'Post created successfully',
                 'post' => $post,
-                'mastodon_response' => $postData
+                'mastodon_response' => $postResponse
             ]);
 
         } catch (\Exception $e) {
@@ -189,61 +160,166 @@ class MastodonPostController extends Controller
     }
 
     /**
-     * Upload a single media file
+     * Process media upload with retries and validation
+     *
+     * @param string $url
+     * @param string $token
+     * @param string $instanceUrl
+     * @return array|null
+     * @throws \Exception
      */
-    public function uploadMedia(Request $request)
+    private function processMediaUpload($url, $token, $instanceUrl)
     {
-        $request->validate([
-            'user_id' => 'required|exists:mastodon_users,id',
-            'media_url' => 'required|url',
-            'description' => 'nullable|string',
-            'focus' => 'nullable|string' // Format: "x,y" between -1 and 1
-        ]);
-
-        try {
-            $user = MastodonUser::findOrFail($request->user_id);
-
-            $mediaResponse = $this->uploadMediaFromUrl(
-                $request->media_url,
-                $user->mastodon_access_token,
-                $user->instance_url
-            );
-
-            // Update media description if provided
-            if ($request->filled('description') || $request->filled('focus')) {
-                $updateResponse = Http::withToken($user->mastodon_access_token)
-                    ->put("{$user->instance_url}/api/v1/media/{$mediaResponse['id']}", array_filter([
-                        'description' => $request->description,
-                        'focus' => $request->focus
-                    ]));
-
-                if ($updateResponse->successful()) {
-                    $mediaResponse = $updateResponse->json();
+        $attempts = 0;
+        while ($attempts < self::MAX_RETRY_ATTEMPTS) {
+            try {
+                return $this->uploadMediaFromUrl($url, $token, $instanceUrl);
+            } catch (\Exception $e) {
+                $attempts++;
+                if ($attempts >= self::MAX_RETRY_ATTEMPTS) {
+                    throw $e;
                 }
+                sleep(1); // Wait before retry
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Upload media from URL to Mastodon
+     *
+     * @param string $url
+     * @param string $token
+     * @param string $instanceUrl
+     * @return array
+     * @throws \Exception
+     */
+    private function uploadMediaFromUrl($url, $token, $instanceUrl)
+    {
+        try {
+            // Download media with progress tracking
+            $tempFile = $this->downloadMediaFile($url);
+            
+            // Get and validate media type
+            $mimeType = mime_content_type($tempFile);
+            if (!isset($this->mediaTypes[$mimeType])) {
+                unlink($tempFile);
+                throw new \Exception("Unsupported media type: {$mimeType}");
             }
 
-            return response()->json([
-                'status' => 'success',
-                'message' => 'Media uploaded successfully',
-                'media' => $mediaResponse
-            ]);
+            $mediaInfo = $this->mediaTypes[$mimeType];
+            $extension = $mediaInfo['ext'];
+            
+            // Upload to Mastodon
+            $response = Http::withToken($token)
+                ->timeout(120)
+                ->attach(
+                    'file',
+                    file_get_contents($tempFile),
+                    "media.{$extension}",
+                    ['Content-Type' => $mimeType]
+                )
+                ->post("{$instanceUrl}/api/v1/media");
+
+            unlink($tempFile);
+
+            if (!$response->successful()) {
+                throw new \Exception("Upload failed: " . $response->body());
+            }
+
+            // Wait for processing
+            $mediaId = $response->json()['id'];
+            $maxWait = ($mediaInfo['type'] === 'video') ? self::MAX_VIDEO_WAIT : self::MAX_IMAGE_WAIT;
+            
+            return $this->waitForMediaProcessing($mediaId, $token, $instanceUrl, $maxWait);
 
         } catch (\Exception $e) {
-            Log::error('Mastodon Media Upload Error', [
-                'error' => $e->getMessage(),
-                'trace' => $e->getTraceAsString()
-            ]);
-
-            return response()->json([
-                'status' => 'error',
-                'message' => 'Failed to upload media',
+            Log::error('Media Upload Error', [
+                'url' => $url,
                 'error' => $e->getMessage()
-            ], 500);
+            ]);
+            throw $e;
         }
     }
 
     /**
+     * Download media file with progress tracking
+     *
+     * @param string $url
+     * @return string Path to temporary file
+     * @throws \Exception
+     */
+    private function downloadMediaFile($url)
+    {
+        $tempFile = tempnam(sys_get_temp_dir(), 'mastodon_');
+        
+        $ch = curl_init($url);
+        $fp = fopen($tempFile, 'wb');
+        
+        curl_setopt_array($ch, [
+            CURLOPT_FILE => $fp,
+            CURLOPT_HEADER => 0,
+            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_TIMEOUT => 60,
+            CURLOPT_MAXFILESIZE => self::MAX_FILE_SIZE
+        ]);
+        
+        $success = curl_exec($ch);
+        $error = curl_error($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        
+        fclose($fp);
+        curl_close($ch);
+        
+        if (!$success || $httpCode !== 200) {
+            unlink($tempFile);
+            throw new \Exception("Download failed: {$error}");
+        }
+        
+        return $tempFile;
+    }
+
+    /**
+     * Wait for media processing completion
+     *
+     * @param string $mediaId
+     * @param string $token
+     * @param string $instanceUrl
+     * @param int $maxWait
+     * @return array
+     * @throws \Exception
+     */
+    private function waitForMediaProcessing($mediaId, $token, $instanceUrl, $maxWait)
+    {
+        $start = time();
+        while (time() - $start < $maxWait) {
+            $response = Http::withToken($token)
+                ->get("{$instanceUrl}/api/v1/media/{$mediaId}");
+
+            if ($response->successful()) {
+                $data = $response->json();
+                
+                if (isset($data['url']) && $data['url']) {
+                    return $data;
+                }
+                
+                if (isset($data['error'])) {
+                    throw new \Exception("Processing failed: {$data['error']}");
+                }
+            }
+            
+            sleep(1);
+        }
+        
+        throw new \Exception("Media processing timeout after {$maxWait} seconds");
+    }
+
+    /**
      * Delete a post
+     *
+     * @param Request $request
+     * @param string $postId
+     * @return \Illuminate\Http\JsonResponse
      */
     public function deletePost(Request $request, $postId)
     {
