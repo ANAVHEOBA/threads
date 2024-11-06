@@ -38,4 +38,12 @@ return [
     'scope' => env('THREADS_SCOPE', 'threads_basic threads_content_publish'),
 ],
 
+
+'mastodon' => [
+    'instance_url' => env('MASTODON_INSTANCE_URL', 'https://mastodon.social'),
+    'client_id' => env('MASTODON_CLIENT_ID'),
+    'client_secret' => env('MASTODON_CLIENT_SECRET'),
+    'redirect_uri' => env('MASTODON_REDIRECT_URI'),
+],
+
 ];
